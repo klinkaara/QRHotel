@@ -23,6 +23,10 @@ import menuItems from "../data/menuData"
 import LoadingSpinner from "../data/loading-spinner"
 
 export default function OwnerDashboard() {
+    const getLocalDateString = (date = new Date()) => {
+        return date.toLocaleDateString("en-CA") // YYYY-MM-DD (LOCAL)
+    }
+    const today = getLocalDateString()
     const [mergedOrders, setMergedOrders] = useState([])
     const [tablePins, setTablePins] = useState([])
     const [individualOrders, setIndividualOrders] = useState([]) // Customer's raw orders
@@ -36,7 +40,8 @@ export default function OwnerDashboard() {
     const [showBillModal, setShowBillModal] = useState(false)
     const [currentBillData, setCurrentBillData] = useState(null)
     // New states for date-wise reports
-    const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split("T")[0])
+    const [selectedDate, setSelectedDate] = useState(getLocalDateString())
+
     const [dateWiseData, setDateWiseData] = useState({})
     const [connectionStatus, setConnectionStatus] = useState("connected")
     const [newOrderAlert, setNewOrderAlert] = useState(null)
@@ -106,8 +111,9 @@ export default function OwnerDashboard() {
     const getDateString = (timestamp) => {
         if (!timestamp) return null
         const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp)
-        return date.toISOString().split("T")[0]
+        return date.toLocaleDateString("en-CA") // YYYY-MM-DD LOCAL
     }
+
     // Listen to table pins
     useEffect(() => {
         const unsubscribe = onSnapshot(collection(db, "tablePins"), (snapshot) => {
@@ -762,8 +768,22 @@ export default function OwnerDashboard() {
         window.location.reload() // Reload to restore original page content and state
     }
     // NEW: Today's Analytics Calculations (only today's data)
+    const calculateRevenueFromOrders = (orders, dateStr) => {
+        let revenue = 0
+
+        orders.forEach(order => {
+            const orderDate = getDateString(order.created)
+            if (order.status === "Completed" && orderDate === dateStr) {
+                order.items?.forEach(item => {
+                    revenue += item.price * item.qty
+                })
+            }
+        })
+
+        return revenue
+    }
+
     const calculateTodayAnalytics = () => {
-        const today = new Date().toISOString().split("T")[0]
         const todayItems = allIndividualItemsHistory.filter((item) => {
             const itemDate = getDateString(item.created)
             return itemDate === today
@@ -839,7 +859,8 @@ export default function OwnerDashboard() {
     }
     // NEW: Get today's history items
     const getTodayHistoryItems = () => {
-        const today = new Date().toISOString().split("T")[0]
+        const today = getLocalDateString()
+
         return allIndividualItemsHistory.filter((item) => {
             const itemDate = getDateString(item.created)
             return itemDate === today
@@ -849,9 +870,13 @@ export default function OwnerDashboard() {
         () => tablePins.filter((p) => !p.closed).length,
         [tablePins]
     )
-    const totalRevenue = todayAnalytics.totalRevenue
+    const totalRevenue = calculateRevenueFromOrders(allOrdersHistory, today)
     const readyOrders = Object.values(kitchenStatuses).filter((s) => s.status === "Ready").length
     const pendingOrders = Object.values(kitchenStatuses).filter((s) => ["Preparing", "Pending"].includes(s.status)).length
+
+
+
+
     return (
         <div className="owner-dashboard">
             {loading && <LoadingSpinner/>}
