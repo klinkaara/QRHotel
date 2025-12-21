@@ -356,39 +356,55 @@ export default function WaiterDashboard() {
     if (!window.confirm("Are you sure you want to clear all tables? This will close all active sessions.")) {
       return
     }
+
     setLoading(true)
+
     try {
+      // 1️⃣ Fetch everything FIRST
       const pinsSnap = await getDocs(collection(db, "tablePins"))
-      for (const pinDoc of pinsSnap.docs) {
-        await deleteDoc(doc(db, "tablePins", pinDoc.id))
-      }
       const mergedSnap = await getDocs(collection(db, "mergedOrders"))
-      for (const mergedDoc of mergedSnap.docs) {
-        await deleteDoc(doc(db, "mergedOrders", mergedDoc.id))
-      }
       const individualItemsSnap = await getDocs(collection(db, "individualItems"))
-      for (const itemDoc of individualItemsSnap.docs) {
-        await deleteDoc(doc(db, "individualItems", itemDoc.id))
-      }
       const ordersSnap = await getDocs(collection(db, "orders"))
-      for (const orderDoc of ordersSnap.docs) {
-        await updateDoc(doc(db, "orders", orderDoc.id), {
+      const kitchenOrdersSnap = await getDocs(collection(db, "kitchenOrders"))
+
+      // 2️⃣ Batch all operations
+      const batch = writeBatch(db)
+
+      pinsSnap.docs.forEach((docSnap) => {
+        batch.delete(doc(db, "tablePins", docSnap.id))
+      })
+
+      mergedSnap.docs.forEach((docSnap) => {
+        batch.delete(doc(db, "mergedOrders", docSnap.id))
+      })
+
+      individualItemsSnap.docs.forEach((docSnap) => {
+        batch.delete(doc(db, "individualItems", docSnap.id))
+      })
+
+      kitchenOrdersSnap.docs.forEach((docSnap) => {
+        batch.delete(doc(db, "kitchenOrders", docSnap.id))
+      })
+
+      ordersSnap.docs.forEach((docSnap) => {
+        batch.update(doc(db, "orders", docSnap.id), {
           status: "Completed",
           sessionActive: false,
           closedAt: Timestamp.now(),
         })
-      }
-      const kitchenOrdersSnap = await getDocs(collection(db, "kitchenOrders"))
-      for (const kitchenDoc of kitchenOrdersSnap.docs) {
-        await deleteDoc(doc(db, "kitchenOrders", kitchenDoc.id))
-      }
+      })
+
+      // 3️⃣ Commit ONCE
+      await batch.commit()
     } catch (error) {
       console.error("Failed to clear tables:", error)
       alert("❌ Failed to clear tables")
     } finally {
+      // 4️⃣ GUARANTEED spinner stop
       setLoading(false)
     }
   }
+
   const adjustIndividualItemQuantity = async (itemGroup, delta) => {
     setLoading(true)
     const { itemName, sessionId, ids, table } = itemGroup
