@@ -1,361 +1,381 @@
 "use client"
-import { useEffect, useState, useRef } from "react"
-import { db } from "../firebase"
-import { collection, onSnapshot, doc, updateDoc, getDocs, query, where, deleteDoc } from "firebase/firestore"
+import {useEffect, useState, useRef} from "react"
+import {db} from "../firebase"
+import {collection, onSnapshot, doc, updateDoc, getDocs, query, where, deleteDoc} from "firebase/firestore"
 import LoadingSpinner from "../data/loading-spinner"
+import {writeBatch} from "firebase/firestore"
+import { useMemo } from "react"
+
+
 
 export default function KitchenDashboard() {
-  const [kitchenOrders, setKitchenOrders] = useState([])
-  const [loading, setLoading] = useState(false)
-  const [connectionStatus, setConnectionStatus] = useState("connected")
-  const [newOrderAlert, setNewOrderAlert] = useState(null)
-  // Refs for tracking previous states to detect new orders
-  const prevKitchenOrdersRef = useRef([])
-  const audioRef = useRef(null)
+    const [kitchenOrders, setKitchenOrders] = useState([])
+    const [loading, setLoading] = useState(false)
+    const [connectionStatus, setConnectionStatus] = useState("connected")
+    const [newOrderAlert, setNewOrderAlert] = useState(null)
+    // Refs for tracking previous states to detect new orders
+    const prevKitchenOrdersRef = useRef([])
+    const audioRef = useRef(null)
 
-  const [headerVisible, setHeaderVisible] = useState(true)
-  const lastScrollY = useRef(0)
-  const headerRef = useRef(null)
+    const [headerVisible, setHeaderVisible] = useState(true)
+    const lastScrollY = useRef(0)
+    const headerRef = useRef(null)
 
-  // Initialize audio for notifications
-  useEffect(() => {
-    audioRef.current = new Audio(
-      "data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBSuBzvLZiTYIG2m98OScTgwOUarm7blmGgU7k9n1unEiBC13yO/eizEIHWq+8+OWT",
-    )
-  }, [])
+    // Initialize audio for notifications
+    useEffect(() => {
+        audioRef.current = new Audio(
+            "data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBSuBzvLZiTYIG2m98OScTgwOUarm7blmGgU7k9n1unEiBC13yO/eizEIHWq+8+OWT",
+        )
+    }, [])
 
-  useEffect(() => {
-    const handleScroll = () => {
-      if (headerRef.current) {
-        const currentScrollY = window.scrollY
-        const headerHeight = headerRef.current.offsetHeight
+    useEffect(() => {
+        const handleScroll = () => {
+            if (headerRef.current) {
+                const currentScrollY = window.scrollY
+                const headerHeight = headerRef.current.offsetHeight
 
-        if (currentScrollY > lastScrollY.current && currentScrollY > headerHeight) {
-          // Scrolling down past header height
-          setHeaderVisible(false)
-        } else if (currentScrollY < lastScrollY.current) {
-          // Scrolling up
-          setHeaderVisible(true)
+                if (currentScrollY > lastScrollY.current && currentScrollY > headerHeight) {
+                    // Scrolling down past header height
+                    setHeaderVisible(false)
+                } else if (currentScrollY < lastScrollY.current) {
+                    // Scrolling up
+                    setHeaderVisible(true)
+                }
+                lastScrollY.current = currentScrollY
+            }
         }
-        lastScrollY.current = currentScrollY
-      }
-    }
 
-    window.addEventListener("scroll", handleScroll)
-    return () => window.removeEventListener("scroll", handleScroll)
-  }, [])
+        window.addEventListener("scroll", handleScroll)
+        return () => window.removeEventListener("scroll", handleScroll)
+    }, [])
 
-  // Function to show new order notification
-  const showNewOrderNotification = (orderData) => {
-    setNewOrderAlert({
-      message: `🔔 New kitchen order for Table ${orderData.table}!`,
-      timestamp: Date.now(),
-    })
-    // Play notification sound
-    if (audioRef.current) {
-      audioRef.current.play().catch((e) => console.log("Audio play failed:", e))
+    // Function to show new order notification
+    const showNewOrderNotification = (orderData) => {
+        setNewOrderAlert({
+            message: `🔔 New kitchen order for Table ${orderData.table}!`,
+            timestamp: Date.now(),
+        })
+        // Play notification sound
+        if (audioRef.current) {
+            audioRef.current.play().catch((e) => console.log("Audio play failed:", e))
+        }
+        // Auto-hide notification after 5 seconds
+        setTimeout(() => {
+            setNewOrderAlert(null)
+        }, 5000)
     }
-    // Auto-hide notification after 5 seconds
-    setTimeout(() => {
-      setNewOrderAlert(null)
-    }, 5000)
-  }
-  // Enhanced listener for kitchen orders with new order detection
+    // Enhanced listener for kitchen orders with new order detection
   useEffect(() => {
     setConnectionStatus("connecting")
+
     const unsubscribe = onSnapshot(
-      collection(db, "kitchenOrders"),
-      (snapshot) => {
-        const orders = snapshot.docs.map((doc) => {
-          const data = { id: doc.id, ...doc.data() }
-          return data
-        })
-        // Check for new orders
-        const prevOrders = prevKitchenOrdersRef.current
-        const newOrders = orders.filter(
-          (order) =>
-            !prevOrders.find((prevOrder) => prevOrder.id === order.id) &&
-            ["Pending", "Preparing", "Ready"].includes(order.status),
-        )
-        if (newOrders.length > 0 && prevOrders.length > 0) {
-          newOrders.forEach((order) => {
-            showNewOrderNotification(order)
-          })
-        }
-        // Filter and sort orders - RECENT ORDERS AT TOP
-        const filteredOrders = orders
-          .filter((order) => ["Pending", "Preparing", "Ready"].includes(order.status))
-          .sort((a, b) => b.receivedAt - a.receivedAt)
-        setKitchenOrders(filteredOrders)
-        prevKitchenOrdersRef.current = filteredOrders
-        setConnectionStatus("connected")
-      },
-      (error) => {
-        console.error("Error listening to kitchen orders:", error)
-        setConnectionStatus("error")
-      },
+        query(
+            collection(db, "kitchenOrders"),
+            where("status", "in", ["Pending", "Preparing", "Ready"])
+        ),
+        (snapshot) => {
+          const orders = snapshot.docs.map((doc) => ({
+            id: doc.id,
+            ...doc.data(),
+          }))
+
+          const prevOrders = prevKitchenOrdersRef.current
+          const newOrders = orders.filter(
+              (order) =>
+                  !prevOrders.find((p) => p.id === order.id) &&
+                  ["Pending", "Preparing", "Ready"].includes(order.status)
+          )
+
+          if (newOrders.length && prevOrders.length) {
+            newOrders.forEach(showNewOrderNotification)
+          }
+
+          const sorted = orders.sort((a, b) => b.receivedAt - a.receivedAt)
+          setKitchenOrders(sorted)
+          prevKitchenOrdersRef.current = sorted
+          setConnectionStatus("connected")
+        },
+        () => setConnectionStatus("error")
     )
+
     return () => unsubscribe()
   }, [])
+
   const updateOrderStatus = async (orderId, newStatus) => {
-    setLoading(true)
-    try {
-      await updateDoc(doc(db, "kitchenOrders", orderId), {
-        status: newStatus,
-        updatedAt: new Date(),
-      })
-      console.log(`✅ Kitchen order ${orderId} status updated to ${newStatus} in 'kitchenOrders'.`)
-      const order = kitchenOrders.find((o) => o.id === orderId)
-      if (order && order.originalOrderId) {
-        await updateDoc(doc(db, "mergedOrders", order.originalOrderId), {
-          kitchenStatus: newStatus,
-          kitchenUpdatedAt: new Date(),
-        })
-        console.log(`✅ Merged order ${order.originalOrderId} status updated to ${newStatus}.`)
-        const itemsInThisKitchenOrder = order.items || []
-        const sessionId = order.originalOrderId
-        const table = order.table
-        for (const itemToUpdate of itemsInThisKitchenOrder) {
-          const q = query(
-            collection(db, "individualItems"),
-            where("sessionId", "==", sessionId),
-            where("table", "==", table),
-            where("itemName", "==", itemToUpdate.name),
-            where("kitchenStatus", "!=", "Canceled"),
-          )
-          const querySnapshot = await getDocs(q)
-          let updatedCount = 0
-          const itemsToProcess = querySnapshot.docs.filter((docSnap) => docSnap.data().kitchenStatus !== newStatus)
-          for (const docSnap of itemsToProcess) {
-            if (updatedCount < itemToUpdate.qty) {
-              await updateDoc(doc(db, "individualItems", docSnap.id), {
+        setLoading(true)
+
+        try {
+            // 1️⃣ Update kitchenOrders status
+            await updateDoc(doc(db, "kitchenOrders", orderId), {
+                status: newStatus,
+                updatedAt: new Date(),
+            })
+
+            const order = kitchenOrders.find((o) => o.id === orderId)
+            if (!order || !order.originalOrderId) return
+
+            // 2️⃣ Update mergedOrders
+            await updateDoc(doc(db, "mergedOrders", order.originalOrderId), {
                 kitchenStatus: newStatus,
-                updated: new Date(),
-              })
-              updatedCount++
-              console.log(`✅ Individual item ${docSnap.id} status updated to ${newStatus}.`)
-            } else {
-              break
+                kitchenUpdatedAt: new Date(),
+            })
+
+            // 3️⃣ Batch update individualItems (FAST)
+            const batch = writeBatch(db)
+
+            for (const itemToUpdate of order.items || []) {
+                const q = query(
+                    collection(db, "individualItems"),
+                    where("sessionId", "==", order.originalOrderId),
+                    where("table", "==", order.table),
+                    where("itemName", "==", itemToUpdate.name),
+                    where("kitchenStatus", "!=", "Canceled"),
+                )
+
+                const snap = await getDocs(q)
+                let updatedCount = 0
+
+                for (const docSnap of snap.docs) {
+                    if (updatedCount >= itemToUpdate.qty) break
+
+                    batch.update(doc(db, "individualItems", docSnap.id), {
+                        kitchenStatus: newStatus,
+                        updated: new Date(),
+                    })
+
+                    updatedCount++
+                }
             }
-          }
+
+            await batch.commit()
+
+        } catch (error) {
+            console.error("Failed to update status:", error)
+        } finally {
+            setTimeout(() => setLoading(false), 300)
         }
-      }
-    } catch (error) {
-      console.error("Failed to update status:", error)
-    } finally {
-      setLoading(false)
     }
-  }
-  const clearAllOrders = async () => {
-    if (!window.confirm("Are you sure you want to clear all kitchen orders? This is typically done at end of day.")) {
-      return
+
+    const clearAllOrders = async () => {
+        if (!window.confirm("Are you sure you want to clear all kitchen orders? This is typically done at end of day.")) {
+            return
+        }
+        setLoading(true)
+        try {
+            const kitchenOrdersSnap = await getDocs(collection(db, "kitchenOrders"))
+            for (const orderDoc of kitchenOrdersSnap.docs) {
+                await deleteDoc(doc(db, "kitchenOrders", orderDoc.id))
+            }
+            console.log("✅ All kitchen orders cleared successfully.")
+        } catch (error) {
+            console.error("Failed to clear orders:", error)
+        } finally {
+            setLoading(false)
+        }
     }
-    setLoading(true)
-    try {
-      const kitchenOrdersSnap = await getDocs(collection(db, "kitchenOrders"))
-      for (const orderDoc of kitchenOrdersSnap.docs) {
-        await deleteDoc(doc(db, "kitchenOrders", orderDoc.id))
-      }
-      console.log("✅ All kitchen orders cleared successfully.")
-    } catch (error) {
-      console.error("Failed to clear orders:", error)
-    } finally {
-      setLoading(false)
+    const formatTime = (timestamp) => {
+        if (!timestamp) return ""
+        const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp)
+        return date.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})
     }
-  }
-  const formatTime = (timestamp) => {
-    if (!timestamp) return ""
-    const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp)
-    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-  }
-  const getTimeDifference = (timestamp) => {
-    if (!timestamp) return ""
-    const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp)
-    const now = new Date()
-    const diffMinutes = Math.floor((now - date) / (1000 * 60))
-    if (diffMinutes < 1) return "Just now"
-    if (diffMinutes === 1) return "1 min ago"
-    return `${diffMinutes} mins ago`
-  }
-  const getStatusColor = (status) => {
-    switch (status) {
-      case "Pending":
-        return "#ffc107"
-      case "Preparing":
-        return "#17a2b8"
-      case "Ready":
-        return "#28a745"
-      default:
-        return "#6c757d"
+    const getTimeDifference = (timestamp) => {
+        if (!timestamp) return ""
+        const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp)
+        const now = new Date()
+        const diffMinutes = Math.floor((now - date) / (1000 * 60))
+        if (diffMinutes < 1) return "Just now"
+        if (diffMinutes === 1) return "1 min ago"
+        return `${diffMinutes} mins ago`
     }
-  }
-  const getStatusTextColor = (status) => {
-    return status === "Pending" ? "#000" : "white"
-  }
-  const getOrderNumberForTable = (order) => {
-    const tableOrders = kitchenOrders.filter((o) => o.table === order.table).sort((a, b) => a.receivedAt - b.receivedAt)
-    const orderIndex = tableOrders.findIndex((o) => o.id === order.id)
-    return orderIndex + 1
-  }
-  // Calculate counts for different statuses
-  const pendingOrdersCount = kitchenOrders.filter((order) => order.status === "Pending").length
-  const readyOrdersCount = kitchenOrders.filter((order) => order.status === "Ready").length
+    const getStatusColor = (status) => {
+        switch (status) {
+            case "Pending":
+                return "#ffc107"
+            case "Preparing":
+                return "#17a2b8"
+            case "Ready":
+                return "#28a745"
+            default:
+                return "#6c757d"
+        }
+    }
+    const getStatusTextColor = (status) => {
+        return status === "Pending" ? "#000" : "white"
+    }
+    const getOrderNumberForTable = (order) => {
+        const tableOrders = kitchenOrders.filter((o) => o.table === order.table).sort((a, b) => a.receivedAt - b.receivedAt)
+        const orderIndex = tableOrders.findIndex((o) => o.id === order.id)
+        return orderIndex + 1
+    }
+    // Calculate counts for different statuses
+  const pendingOrdersCount = useMemo(
+      () => kitchenOrders.filter((o) => o.status === "Pending").length,
+      [kitchenOrders]
+  )
+
+  const readyOrdersCount = useMemo(
+      () => kitchenOrders.filter((o) => o.status === "Ready").length,
+      [kitchenOrders]
+  )
+
   return (
-    <div className="kitchen-dashboard">
-      {loading && <LoadingSpinner />}
-      {/* Connection Status Indicator */}
-      <div className={`connection-status ${connectionStatus}`}>
-        <div className="status-indicator">
-          {connectionStatus === "connected" && "🟢 Live Updates Active"}
-          {connectionStatus === "connecting" && "🟡 Connecting..."}
-          {connectionStatus === "error" && "🔴 Connection Error"}
-        </div>
-      </div>
-      {/* New Order Alert */}
-      {newOrderAlert && (
-        <div className="new-order-alert">
-          <div className="alert-content">
-            <span className="alert-icon">🔔</span>
-            <span className="alert-message">{newOrderAlert.message}</span>
-            <button className="alert-close" onClick={() => setNewOrderAlert(null)}>
-              ×
-            </button>
-          </div>
-        </div>
-      )}
-      {/* Enhanced Header */}
-      <div
-        ref={headerRef} // Added ref to header
-        className="header"
-        style={{
-          transform: headerVisible ? "translateY(0)" : "translateY(-100%)",
-          transition: "transform 0.3s ease-in-out", // Added transition for smooth hide/show
-        }}
-      >
-        {/* </CHANGE> */}
-        <div className="header-content">
-          <div className="header-top">
-            <div className="header-title">
-              <h1>
-                <img
-                  src="/logo.png" // Updated image source to public/logo.png
-                  width="150"
-                  height="150"
-                  alt="Restaurant logo"
-                  style={{ verticalAlign: "middle", marginRight: "10px" }}
-                />
-                {/* </CHANGE> */}
-                Kitchen Dashboard
-              </h1>
-              <p>Prepare orders • {kitchenOrders.length} active orders • Live Updates</p>
+        <div className="kitchen-dashboard">
+            {loading && <LoadingSpinner/>}
+            {/* Connection Status Indicator */}
+            <div className={`connection-status ${connectionStatus}`}>
+                <div className="status-indicator">
+                    {connectionStatus === "connected" && "🟢 Live Updates Active"}
+                    {connectionStatus === "connecting" && "🟡 Connecting..."}
+                    {connectionStatus === "error" && "🔴 Connection Error"}
+                </div>
             </div>
-            <button onClick={clearAllOrders} className="clear-all-btn">
-              🗑️ Clear All Orders
-            </button>
-          </div>
-          {/* Stats Row */}
-          <div className="stats-grid">
-            <div className="stat-card active-orders">
-              <div className="stat-number">{kitchenOrders.length}</div>
-              <div className="stat-label">Active Orders</div>
-            </div>
-            <div className="stat-card pending-orders">
-              <div className="stat-number">{pendingOrdersCount}</div>
-              <div className="stat-label">Pending Orders</div>
-            </div>
-            <div className="stat-card ready-orders">
-              <div className="stat-number">{readyOrdersCount}</div>
-              <div className="stat-label">Ready Orders</div>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div className="main-content">
-        {kitchenOrders.length === 0 ? (
-          <div className="empty-state">
-            <div className="empty-icon">🍽️</div>
-            <h3>No Active Orders</h3>
-            <p>Waiting for waiters to send orders to kitchen...</p>
-          </div>
-        ) : (
-          <div className="orders-grid">
-            {kitchenOrders.map((order) => (
-              <div
-                key={order.id}
-                className="order-card"
-                style={{
-                  borderColor: getStatusColor(order.status),
-                }}
-              >
-                {/* Header */}
-                <div className="order-header">
-                  <div className="order-info">
-                    <h3 className="order-title">
-                      🍽️ Table {order.table} - Order #{getOrderNumberForTable(order)}
-                    </h3>
-                    {order.customerNames && order.customerNames.length > 0 && (
-                      <div className="customer-names">👥 {order.customerNames.join(", ")}</div>
-                    )}
-                    <div className="order-time">
-                      📅 {formatTime(order.receivedAt)} ({getTimeDifference(order.receivedAt)})
+            {/* New Order Alert */}
+            {newOrderAlert && (
+                <div className="new-order-alert">
+                    <div className="alert-content">
+                        <span className="alert-icon">🔔</span>
+                        <span className="alert-message">{newOrderAlert.message}</span>
+                        <button className="alert-close" onClick={() => setNewOrderAlert(null)}>
+                            ×
+                        </button>
                     </div>
-                    <div className="items-count">📦 {order.items.length} items in this order</div>
-                  </div>
-                  <div className="status-badge-container">
+                </div>
+            )}
+            {/* Enhanced Header */}
+            <div
+                ref={headerRef} // Added ref to header
+                className="header"
+                style={{
+                    transform: headerVisible ? "translateY(0)" : "translateY(-100%)",
+                    transition: "transform 0.3s ease-in-out", // Added transition for smooth hide/show
+                }}
+            >
+                {/* </CHANGE> */}
+                <div className="header-content">
+                    <div className="header-top">
+                        <div className="header-title">
+                            <h1>
+                                <img
+                                    src="/logo.png" // Updated image source to public/logo.png
+                                    width="150"
+                                    height="150"
+                                    alt="Restaurant logo"
+                                    style={{verticalAlign: "middle", marginRight: "10px"}}
+                                />
+                                {/* </CHANGE> */}
+                                Kitchen Dashboard
+                            </h1>
+                            <p>Prepare orders • {kitchenOrders.length} active orders • Live Updates</p>
+                        </div>
+                        <button onClick={clearAllOrders} className="clear-all-btn">
+                            🗑️ Clear All Orders
+                        </button>
+                    </div>
+                    {/* Stats Row */}
+                    <div className="stats-grid">
+                        <div className="stat-card active-orders">
+                            <div className="stat-number">{kitchenOrders.length}</div>
+                            <div className="stat-label">Active Orders</div>
+                        </div>
+                        <div className="stat-card pending-orders">
+                            <div className="stat-number">{pendingOrdersCount}</div>
+                            <div className="stat-label">Pending Orders</div>
+                        </div>
+                        <div className="stat-card ready-orders">
+                            <div className="stat-number">{readyOrdersCount}</div>
+                            <div className="stat-label">Ready Orders</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div className="main-content">
+                {kitchenOrders.length === 0 ? (
+                    <div className="empty-state">
+                        <div className="empty-icon">🍽️</div>
+                        <h3>No Active Orders</h3>
+                        <p>Waiting for waiters to send orders to kitchen...</p>
+                    </div>
+                ) : (
+                    <div className="orders-grid">
+                        {kitchenOrders.map((order) => (
+                            <div
+                                key={order.id}
+                                className="order-card"
+                                style={{
+                                    borderColor: getStatusColor(order.status),
+                                }}
+                            >
+                                {/* Header */}
+                                <div className="order-header">
+                                    <div className="order-info">
+                                        <h3 className="order-title">
+                                            🍽️ Table {order.table} - Order #{getOrderNumberForTable(order)}
+                                        </h3>
+                                        {order.customerNames && order.customerNames.length > 0 && (
+                                            <div className="customer-names">👥 {order.customerNames.join(", ")}</div>
+                                        )}
+                                        <div className="order-time">
+                                            📅 {formatTime(order.receivedAt)} ({getTimeDifference(order.receivedAt)})
+                                        </div>
+                                        <div className="items-count">📦 {order.items.length} items in this order</div>
+                                    </div>
+                                    <div className="status-badge-container">
                     <span
-                      className="status-badge"
-                      style={{
-                        backgroundColor: getStatusColor(order.status),
-                        color: getStatusTextColor(order.status),
-                      }}
+                        className="status-badge"
+                        style={{
+                            backgroundColor: getStatusColor(order.status),
+                            color: getStatusTextColor(order.status),
+                        }}
                     >
                       {order.status.toUpperCase()}
                     </span>
-                  </div>
-                </div>
-                {/* Items to Prepare */}
-                <div className="items-section">
-                  <h4 className="items-title">📋 Items to Prepare:</h4>
-                  <div className="items-container">
-                    {order.items.map((item, idx) => (
-                      <div
-                        key={idx}
-                        className="item-row"
-                        style={{
-                          borderBottom: idx < order.items.length - 1 ? "2px solid #dee2e6" : "none",
-                        }}
-                      >
-                        <div className="item-name">{item.name}</div>
-                        <div className="item-quantity">
-                          <span className="quantity-badge">× {item.qty}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                {/* Action Buttons */}
-                <div className="action-buttons">
-                  {order.status === "Pending" && (
-                    <button
-                      onClick={() => updateOrderStatus(order.id, "Preparing")}
-                      className="action-btn preparing-btn"
-                    >
-                      🔥 Start Preparing
-                    </button>
-                  )}
-                  {order.status === "Preparing" && (
-                    <button onClick={() => updateOrderStatus(order.id, "Ready")} className="action-btn ready-btn">
-                      ✅ Mark Ready
-                    </button>
-                  )}
-                  {order.status === "Ready" && <div className="ready-status">🎉 Ready for Pickup!</div>}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-      <style jsx>{`
+                                    </div>
+                                </div>
+                                {/* Items to Prepare */}
+                                <div className="items-section">
+                                    <h4 className="items-title">📋 Items to Prepare:</h4>
+                                    <div className="items-container">
+                                        {order.items.map((item, idx) => (
+                                            <div
+                                                key={idx}
+                                                className="item-row"
+                                                style={{
+                                                    borderBottom: idx < order.items.length - 1 ? "2px solid #dee2e6" : "none",
+                                                }}
+                                            >
+                                                <div className="item-name">{item.name}</div>
+                                                <div className="item-quantity">
+                                                    <span className="quantity-badge">× {item.qty}</span>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                                {/* Action Buttons */}
+                                <div className="action-buttons">
+                                    {order.status === "Pending" && (
+                                        <button
+                                            onClick={() => updateOrderStatus(order.id, "Preparing")}
+                                            className="action-btn preparing-btn"
+                                        >
+                                            🔥 Start Preparing
+                                        </button>
+                                    )}
+                                    {order.status === "Preparing" && (
+                                        <button onClick={() => updateOrderStatus(order.id, "Ready")}
+                                                className="action-btn ready-btn">
+                                            ✅ Mark Ready
+                                        </button>
+                                    )}
+                                    {order.status === "Ready" &&
+                                        <div className="ready-status">🎉 Ready for Pickup!</div>}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+            <style jsx>{`
         .kitchen-dashboard {
           min-height: 100vh;
           background-color: #f8f9fa;
@@ -835,6 +855,6 @@ export default function KitchenDashboard() {
           animation: pulse 2s infinite;
         }
       `}</style>
-    </div>
-  )
+        </div>
+    )
 }

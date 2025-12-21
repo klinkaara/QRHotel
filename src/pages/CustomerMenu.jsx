@@ -1,9 +1,23 @@
 "use client"
-import { useState, useEffect, useRef } from "react" // Import useRef
+import { useState, useEffect, useRef, useMemo } from "react"
+// Import useRef
 import { db } from "../firebase"
-import { collection, addDoc, Timestamp, query, where, onSnapshot, doc, setDoc, updateDoc } from "firebase/firestore"
 import menuItems from "../data/menuData" // This now contains categories
 import LoadingSpinner from "../data/loading-spinner" // Import LoadingSpinner
+
+import {
+  collection,
+  addDoc,
+  Timestamp,
+  query,
+  where,
+  onSnapshot,
+  doc,
+  setDoc,
+  updateDoc,
+  writeBatch,
+} from "firebase/firestore"
+
 
 export default function CustomerMenu() {
   const [order, setOrder] = useState([])
@@ -11,7 +25,6 @@ export default function CustomerMenu() {
   const [customerName, setCustomerName] = useState("")
   const [customerPhone, setCustomerPhone] = useState("")
   const [tablePin, setTablePin] = useState("")
-  const [finalBill, setFinalBill] = useState([])
   const [showPinPrompt, setShowPinPrompt] = useState(false)
   const [infoSubmitted, setInfoSubmitted] = useState(false) // Default to false
   const [sessionClosed, setSessionClosed] = useState(false)
@@ -20,6 +33,28 @@ export default function CustomerMenu() {
   const [pinVerified, setPinVerified] = useState(false)
   const [orderData, setOrderData] = useState(null)
   const [individualItems, setIndividualItems] = useState([])
+  // 🔹 Derived data (calculated from state)
+  const finalBill = useMemo(() => {
+    const grouped = {}
+
+    individualItems
+        .filter(i => i.status !== "Canceled" && i.kitchenStatus !== "Canceled")
+        .forEach(item => {
+          if (!grouped[item.itemName]) {
+            grouped[item.itemName] = {
+              name: item.itemName,
+              price: item.price,
+              qty: 0,
+              totalPrice: 0
+            }
+          }
+          grouped[item.itemName].qty += 1
+          grouped[item.itemName].totalPrice += item.price
+        })
+
+    return Object.values(grouped)
+  }, [individualItems])
+
   const [loading, setLoading] = useState(false) // New loading state
   const [activeCategory, setActiveCategory] = useState(menuItems[0].category) // NEW: State for active category
   const table = new URLSearchParams(window.location.search).get("table")
@@ -77,6 +112,9 @@ export default function CustomerMenu() {
         return "Status Unknown"
     }
   }
+
+  const getTotalItems = (list) => list.reduce((t, i) => t + i.qty, 0)
+
 
   // Load customer info from localStorage on mount (for pre-filling, NOT setting infoSubmitted)
   useEffect(() => {
@@ -174,33 +212,18 @@ export default function CustomerMenu() {
   // Listen to individual items for detailed status and to build the final bill
   useEffect(() => {
     if (!sessionId) return
-    console.log(`CustomerMenu: Listening to individualItems for sessionId: ${sessionId}`)
+
     const unsubscribe = onSnapshot(
-      query(collection(db, "individualItems"), where("sessionId", "==", sessionId)),
-      (snapshot) => {
-        const items = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }))
-        setIndividualItems(items)
-        const billItems = items.filter((item) => item.kitchenStatus !== "Canceled" && item.status !== "Canceled")
-        const groupedBill = billItems.reduce((acc, item) => {
-          if (acc[item.itemName]) {
-            acc[item.itemName].qty += 1
-            acc[item.itemName].totalPrice += item.price
-          } else {
-            acc[item.itemName] = {
-              name: item.itemName,
-              price: item.price,
-              qty: 1,
-              totalPrice: item.price,
-            }
-          }
-          return acc
-        }, {})
-        setFinalBill(Object.values(groupedBill))
-        console.log("CustomerMenu: Individual items updated. Final bill:", Object.values(groupedBill))
-      },
+        query(collection(db, "individualItems"), where("sessionId", "==", sessionId)),
+        (snapshot) => {
+          const items = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }))
+          setIndividualItems(items)
+        }
     )
+
     return () => unsubscribe()
   }, [sessionId])
+
 
   // Listen to scroll events to hide/show header
   useEffect(() => {
@@ -321,7 +344,9 @@ export default function CustomerMenu() {
 
   const placeOrderDirectly = async () => {
     setLoading(true)
+
     try {
+      // 1️⃣ Create main order document (single write)
       await addDoc(collection(db, "orders"), {
         table,
         sessionId,
@@ -332,9 +357,15 @@ export default function CustomerMenu() {
         customerName,
         customerPhone,
       })
-      for (const item of order) {
+
+      // 2️⃣ Batch write for individual items (FAST)
+      const batch = writeBatch(db)
+
+      order.forEach((item) => {
         for (let i = 0; i < item.qty; i++) {
-          await addDoc(collection(db, "individualItems"), {
+          const itemRef = doc(collection(db, "individualItems"))
+
+          batch.set(itemRef, {
             table,
             sessionId,
             itemName: item.name,
@@ -347,17 +378,28 @@ export default function CustomerMenu() {
             itemId: `${item.name}_${customerName}_${Date.now()}_${i}`,
           })
         }
-      }
-      await updateMergedOrders()
+      })
+
+      // 3️⃣ Commit batch (ONE network request)
+      await batch.commit()
+
+      // 4️⃣ Fire merged order update WITHOUT blocking UI
+      updateMergedOrders() // ❌ no await (important)
+
+      // 5️⃣ Clear UI state immediately
       setOrder([])
-      console.log("CustomerMenu: Order placed directly.")
+
     } catch (error) {
       console.error("CustomerMenu: Error placing order:", error)
       alert("❌ Failed to place order. Please try again.")
     } finally {
-      setLoading(false)
+      // 6️⃣ Close loader quickly (UI feels instant)
+      setTimeout(() => {
+        setLoading(false)
+      }, 300)
     }
   }
+
 
   const confirmOrderWithPin = async () => {
     if (!tablePin) {
@@ -368,7 +410,7 @@ export default function CustomerMenu() {
       alert("❌ Invalid PIN.")
       return
     }
-    setLoading(true)
+    // setLoading(true)
     try {
       setPinVerified(true)
       await placeOrderDirectly()
@@ -378,9 +420,10 @@ export default function CustomerMenu() {
     } catch (error) {
       console.error("CustomerMenu: Error confirming PIN and placing order:", error)
       alert("❌ Failed to confirm PIN or place order. Please try again.")
-    } finally {
-      setLoading(false)
     }
+    // finally {
+    //   setLoading(false)
+    // }
   }
 
   const handleDineClose = async () => {
@@ -435,26 +478,32 @@ export default function CustomerMenu() {
   }
 
   const getTotalPrice = (list) => list.reduce((t, i) => t + i.price * i.qty, 0)
-  const getTotalItems = (list) => list.reduce((t, i) => t + i.qty, 0)
+  // const getTotalItems = (list) => list.reduce((t, i) => t + i.qty, 0)
 
-  const groupedIndividualItems = individualItems.reduce((acc, item) => {
-    const statusToDisplay = item.kitchenStatus || item.status
-    const key = `${item.itemName}-${statusToDisplay}`
-    if (!acc[key]) {
-      acc[key] = {
-        itemName: item.itemName,
-        price: item.price,
-        status: statusToDisplay,
-        customers: [],
-        count: 0,
-        totalPrice: 0,
+  const groupedIndividualItems = useMemo(() => {
+    return individualItems.reduce((acc, item) => {
+      const statusToDisplay = item.kitchenStatus || item.status
+      const key = `${item.itemName}-${statusToDisplay}`
+
+      if (!acc[key]) {
+        acc[key] = {
+          itemName: item.itemName,
+          price: item.price,
+          status: statusToDisplay,
+          customers: [],
+          count: 0,
+          totalPrice: 0,
+        }
       }
-    }
-    acc[key].customers.push(item.customerName)
-    acc[key].count += 1
-    acc[key].totalPrice += item.price
-    return acc
-  }, {})
+
+      acc[key].customers.push(item.customerName)
+      acc[key].count += 1
+      acc[key].totalPrice += item.price
+
+      return acc
+    }, {})
+  }, [individualItems])
+
 
   // NEW: Get items for the currently active category
   const currentCategoryItems = menuItems.find((categoryData) => categoryData.category === activeCategory)?.items || []

@@ -1,5 +1,6 @@
 "use client"
-import { useEffect, useState, useRef } from "react"
+import { useEffect, useState, useRef, useMemo } from "react"
+
 import { db } from "../firebase"
 import {
   collection,
@@ -13,7 +14,9 @@ import {
   deleteDoc,
   Timestamp,
   addDoc,
+  writeBatch,
 } from "firebase/firestore"
+
 import menuItems from "../data/menuData"
 import LoadingSpinner from "../data/loading-spinner"
 
@@ -291,39 +294,56 @@ export default function WaiterDashboard() {
       alert("Table is not active")
       return
     }
+
     setLoading(true)
+
     try {
+      // 1️⃣ Close table pin
       await updateDoc(doc(db, "tablePins", String(table)), {
         closed: true,
         closedAt: Timestamp.now(),
         closingRequested: false,
       })
-      const mergedOrder = mergedOrders.find((o) => o.table === table)
-      if (mergedOrder) {
-        await deleteDoc(doc(db, "mergedOrders", mergedOrder.id))
-      }
-      const ordersQuery = query(collection(db, "orders"), where("sessionId", "==", tablePin.sessionId))
-      const ordersSnap = await getDocs(ordersQuery)
-      for (const orderDoc of ordersSnap.docs) {
-        await updateDoc(doc(db, "orders", orderDoc.id), {
+
+      // 2️⃣ Fetch all related data FIRST
+      const ordersSnap = await getDocs(
+          query(collection(db, "orders"), where("sessionId", "==", tablePin.sessionId))
+      )
+
+      const individualItemsSnap = await getDocs(
+          query(collection(db, "individualItems"), where("sessionId", "==", tablePin.sessionId))
+      )
+
+      const kitchenOrdersSnap = await getDocs(
+          query(collection(db, "kitchenOrders"), where("table", "==", table))
+      )
+
+      // 3️⃣ Batch everything
+      const batch = writeBatch(db)
+
+      ordersSnap.docs.forEach((orderDoc) => {
+        batch.update(doc(db, "orders", orderDoc.id), {
           status: "Completed",
           sessionActive: false,
           closedAt: Timestamp.now(),
         })
+      })
+
+      individualItemsSnap.docs.forEach((itemDoc) => {
+        batch.delete(doc(db, "individualItems", itemDoc.id))
+      })
+
+      kitchenOrdersSnap.docs.forEach((kitchenDoc) => {
+        batch.delete(doc(db, "kitchenOrders", kitchenDoc.id))
+      })
+
+      // 4️⃣ Remove merged order
+      const mergedOrder = mergedOrders.find((o) => o.table === table)
+      if (mergedOrder) {
+        batch.delete(doc(db, "mergedOrders", mergedOrder.id))
       }
-      const individualItemsQuery = query(
-        collection(db, "individualItems"),
-        where("sessionId", "==", tablePin.sessionId),
-      )
-      const individualItemsSnap = await getDocs(individualItemsQuery)
-      for (const itemDoc of individualItemsSnap.docs) {
-        await deleteDoc(doc(db, "individualItems", itemDoc.id))
-      }
-      const kitchenOrdersQuery = query(collection(db, "kitchenOrders"), where("table", "==", table))
-      const kitchenOrdersSnap = await getDocs(kitchenOrdersQuery)
-      for (const kitchenDoc of kitchenOrdersSnap.docs) {
-        await deleteDoc(doc(db, "kitchenOrders", kitchenDoc.id))
-      }
+
+      await batch.commit()
     } catch (error) {
       console.error("Failed to close table:", error)
       alert("❌ Failed to close table")
@@ -331,6 +351,7 @@ export default function WaiterDashboard() {
       setLoading(false)
     }
   }
+
   const clearAllTables = async () => {
     if (!window.confirm("Are you sure you want to clear all tables? This will close all active sessions.")) {
       return
@@ -397,13 +418,18 @@ export default function WaiterDashboard() {
             return item && item.kitchenStatus !== "Canceled" && item.status !== "Canceled"
           })
           .slice(0, numToRemove)
-        for (const itemId of itemsToCancel) {
-          await updateDoc(doc(db, "individualItems", itemId), {
+        const batch = writeBatch(db)
+
+        itemsToCancel.forEach((itemId) => {
+          batch.update(doc(db, "individualItems", itemId), {
             kitchenStatus: "Canceled",
             status: "Canceled",
             updated: Timestamp.now(),
           })
-        }
+        })
+
+        await batch.commit()
+
       }
       await syncMergedOrderWithIndividualItems(sessionId, table)
     } catch (error) {
@@ -432,12 +458,17 @@ export default function WaiterDashboard() {
         alert(`No new ${itemName} items to send to kitchen for Table ${table}.`)
         return
       }
-      for (const item of itemsToSend) {
-        await updateDoc(doc(db, "individualItems", item.id), {
+      const batch = writeBatch(db)
+
+      itemsToSend.forEach((item) => {
+        batch.update(doc(db, "individualItems", item.id), {
           kitchenStatus: "Pending",
           updated: Timestamp.now(),
         })
-      }
+      })
+
+      await batch.commit()
+
       const existingKitchenOrderQuery = query(
         collection(db, "kitchenOrders"),
         where("table", "==", table),
@@ -494,20 +525,25 @@ export default function WaiterDashboard() {
   const updateIndividualItemStatus = async (itemIds, newStatus, sessionId, table) => {
     setLoading(true)
     try {
-      for (const id of itemIds) {
-        await updateDoc(doc(db, "individualItems", id), {
+      const batch = writeBatch(db)
+
+      itemIds.forEach((id) => {
+        batch.update(doc(db, "individualItems", id), {
           kitchenStatus: newStatus,
           updated: Timestamp.now(),
         })
-      }
+      })
+
+      await batch.commit()
       await syncMergedOrderWithIndividualItems(sessionId, table)
     } catch (error) {
       console.error("Failed to update individual item status:", error)
       alert("❌ Failed to update item status")
     } finally {
-      setLoading(false)
+      setTimeout(() => setLoading(false), 300)
     }
   }
+
   const syncMergedOrderWithIndividualItems = async (sessionId, table) => {
     const activeIndividualItems = individualItems.filter(
       (item) => item.sessionId === sessionId && item.kitchenStatus !== "Canceled" && item.status !== "Canceled",
@@ -618,7 +654,11 @@ export default function WaiterDashboard() {
     }, {})
     return { groupedItems: Object.values(grouped), totalBill }
   }
-  const activeTables = tablePins.filter((p) => !p.closed).length
+  const activeTables = useMemo(
+      () => tablePins.filter((p) => !p.closed).length,
+      [tablePins]
+  )
+
   const totalBill = tablePins
     .filter((p) => !p.closed)
     .reduce((total, pin) => {
