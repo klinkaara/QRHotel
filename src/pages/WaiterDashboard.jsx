@@ -307,15 +307,15 @@ export default function WaiterDashboard() {
 
       // 2️⃣ Fetch all related data FIRST
       const ordersSnap = await getDocs(
-          query(collection(db, "orders"), where("sessionId", "==", tablePin.sessionId))
+        query(collection(db, "orders"), where("sessionId", "==", tablePin.sessionId))
       )
 
       const individualItemsSnap = await getDocs(
-          query(collection(db, "individualItems"), where("sessionId", "==", tablePin.sessionId))
+        query(collection(db, "individualItems"), where("sessionId", "==", tablePin.sessionId))
       )
 
       const kitchenOrdersSnap = await getDocs(
-          query(collection(db, "kitchenOrders"), where("table", "==", table))
+        query(collection(db, "kitchenOrders"), where("table", "==", table))
       )
 
       // 3️⃣ Batch everything
@@ -671,8 +671,8 @@ export default function WaiterDashboard() {
     return { groupedItems: Object.values(grouped), totalBill }
   }
   const activeTables = useMemo(
-      () => tablePins.filter((p) => !p.closed).length,
-      [tablePins]
+    () => tablePins.filter((p) => !p.closed).length,
+    [tablePins]
   )
 
   const totalBill = tablePins
@@ -1038,13 +1038,14 @@ export default function WaiterDashboard() {
         }
         /* Removed .logo-header entirely */
         .header {
-          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          color: white;
+          background-color: white;
+          color: #333;
           padding: 20px;
-          box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-          position: sticky;
-          top: 0; /* Adjusted for no logo header */
-          z-index: 1000;
+          border-bottom: 1px solid #e9ecef;
+          box-shadow: none; /* Removed box-shadow */
+          /* position: sticky; REMOVED */
+          /* top: 0; REMOVED */
+          /* z-index: 1000; REMOVED */
           margin-top: 0; /* Adjusted for no logo header */
           /* Add transition for smooth hide/show effect */
           transition: transform 0.3s ease-in-out;
@@ -1067,7 +1068,7 @@ export default function WaiterDashboard() {
           margin: 0;
           font-size: clamp(1.5rem, 4vw, 2.5rem);
           font-weight: bold;
-          text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+          color: #343a40;
           display: flex; /* Added to align image and text */
           align-items: center; /* Added to align image and text */
         }
@@ -1093,17 +1094,24 @@ export default function WaiterDashboard() {
           background-color: #c82333;
         }
         .stats-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+          display: flex;
+          overflow-x: auto;
           gap: 15px;
           margin-top: 10px;
+          padding-bottom: 5px;
+          scrollbar-width: none;
+        }
+        .stats-grid::-webkit-scrollbar {
+          display: none;
         }
         .stat-card {
-          background-color: rgba(255, 255, 255, 0.2);
+          background-color: #f8f9fa;
+          min-width: 150px;
+          flex: 0 0 auto;
           padding: 15px;
           border-radius: 10px;
           text-align: center;
-          backdrop-filter: blur(10px);
+          border: 1px solid rgba(0,0,0,0.05);
         }
         .stat-number {
           font-size: 24px;

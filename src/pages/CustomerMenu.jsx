@@ -2,7 +2,6 @@
 import { useState, useEffect, useRef, useMemo } from "react"
 // Import useRef
 import { db } from "../firebase"
-import menuItems from "../data/menuData" // This now contains categories
 import LoadingSpinner from "../data/loading-spinner" // Import LoadingSpinner
 
 import {
@@ -16,6 +15,7 @@ import {
   setDoc,
   updateDoc,
   writeBatch,
+  orderBy, // Check if this was already imported
 } from "firebase/firestore"
 
 
@@ -38,29 +38,33 @@ export default function CustomerMenu() {
     const grouped = {}
 
     individualItems
-        .filter(i => i.status !== "Canceled" && i.kitchenStatus !== "Canceled")
-        .forEach(item => {
-          if (!grouped[item.itemName]) {
-            grouped[item.itemName] = {
-              name: item.itemName,
-              price: item.price,
-              qty: 0,
-              totalPrice: 0
-            }
+      .filter(i => i.status !== "Canceled" && i.kitchenStatus !== "Canceled")
+      .forEach(item => {
+        if (!grouped[item.itemName]) {
+          grouped[item.itemName] = {
+            name: item.itemName,
+            price: item.price,
+            qty: 0,
+            totalPrice: 0
           }
-          grouped[item.itemName].qty += 1
-          grouped[item.itemName].totalPrice += item.price
-        })
+        }
+        grouped[item.itemName].qty += 1
+        grouped[item.itemName].totalPrice += item.price
+      })
 
     return Object.values(grouped)
   }, [individualItems])
 
   const [loading, setLoading] = useState(false) // New loading state
-  const [activeCategory, setActiveCategory] = useState(menuItems[0].category) // NEW: State for active category
+  const [menuItems, setMenuItems] = useState([]) // NEW: Menu items from Firestore
+  const [activeCategory, setActiveCategory] = useState(null) // Dynamic active category
   const table = new URLSearchParams(window.location.search).get("table")
 
   // Key for localStorage to persist customer info per table
   const CUSTOMER_INFO_STORAGE_KEY = `customerInfo_table_${table}`
+  const DRAFT_ORDER_STORAGE_KEY = `draftOrder_table_${table}`
+  const INFO_SUBMITTED_STORAGE_KEY_PREFIX = `infoSubmitted_session_`
+  const PIN_VERIFIED_STORAGE_KEY_PREFIX = `pinVerified_session_`
 
   // Ref to store the previous sessionId to detect changes without re-running effect
   const prevSessionIdRef = useRef(null)
@@ -115,6 +119,19 @@ export default function CustomerMenu() {
 
   const getTotalItems = (list) => list.reduce((t, i) => t + i.qty, 0)
 
+  // NEW: Fetch Menu Items from Firestore
+  useEffect(() => {
+    const unsubscribe = onSnapshot(collection(db, "menu"), (snapshot) => {
+      const categories = snapshot.docs.map(doc => doc.data())
+      setMenuItems(categories)
+      // Set active category to first one if not set
+      if (categories.length > 0) {
+        setActiveCategory(prev => prev || categories[0].category)
+      }
+    })
+    return () => unsubscribe()
+  }, [])
+
 
   // Load customer info from localStorage on mount (for pre-filling, NOT setting infoSubmitted)
   useEffect(() => {
@@ -142,6 +159,40 @@ export default function CustomerMenu() {
     }
   }, [customerName, customerPhone, table, CUSTOMER_INFO_STORAGE_KEY])
 
+  // 🔹 NEW: Load draft order from localStorage on mount
+  useEffect(() => {
+    if (typeof window !== "undefined" && table) {
+      const storedOrder = localStorage.getItem(DRAFT_ORDER_STORAGE_KEY)
+      if (storedOrder) {
+        try {
+          const parsedOrder = JSON.parse(storedOrder)
+          if (Array.isArray(parsedOrder) && parsedOrder.length > 0) {
+            setOrder(parsedOrder)
+            console.log("CustomerMenu: Restored draft order from localStorage:", parsedOrder)
+          }
+        } catch (e) {
+          console.error("CustomerMenu: Failed to parse stored order:", e)
+        }
+      }
+    }
+  }, [table, DRAFT_ORDER_STORAGE_KEY])
+
+  // 🔹 NEW: Save draft order to localStorage whenever it changes
+  useEffect(() => {
+    if (typeof window !== "undefined" && table) {
+      if (order.length > 0) {
+        localStorage.setItem(DRAFT_ORDER_STORAGE_KEY, JSON.stringify(order))
+        // console.log("CustomerMenu: Saved draft order to localStorage")
+      } else {
+        // If order is empty, remove the key so we don't load an empty array unnecessarily
+        // But strictly speaking, if user deletes all items, we WANT empty array.
+        // However, removing it is safer to avoid stale empty states if logic changes.
+        // Let's keep it in sync.
+        localStorage.setItem(DRAFT_ORDER_STORAGE_KEY, JSON.stringify([]))
+      }
+    }
+  }, [order, table, DRAFT_ORDER_STORAGE_KEY])
+
   // Check if table has active session and get PIN data
   useEffect(() => {
     if (!table) {
@@ -156,14 +207,39 @@ export default function CustomerMenu() {
           const pinDoc = snapshot.docs[0]
           const pinData = pinDoc.data()
           const newSessionId = pinData.sessionId
-          // If the session ID has changed, it means a new session has started for this table.
-          // In this case, we should clear customer info and reset infoSubmitted.
-          if (newSessionId !== prevSessionIdRef.current) {
-            console.log("CustomerMenu: New session ID detected. Clearing customer info and resetting infoSubmitted.")
+          // Only reset if we had a previous session (not initial load) AND the ID changed
+          if (prevSessionIdRef.current !== null && newSessionId !== prevSessionIdRef.current) {
+            console.log("CustomerMenu: New session ID detected (Session Changed). Clearing customer info and resetting infoSubmitted.")
             setCustomerName("")
             setCustomerPhone("")
             setInfoSubmitted(false) // Force re-submission for new session
             setPinVerified(false) // Also reset PIN verification
+            // Clear draft order for new session
+            localStorage.removeItem(DRAFT_ORDER_STORAGE_KEY)
+            // Clear PIN verification for old session
+            if (prevSessionIdRef.current) {
+              localStorage.removeItem(`${PIN_VERIFIED_STORAGE_KEY_PREFIX}${prevSessionIdRef.current}`)
+            }
+            setOrder([])
+          } else {
+            // 🔹 NEW: Same session or Initial Load - check if we already submitted info
+            if (newSessionId) {
+              const submittedKey = `${INFO_SUBMITTED_STORAGE_KEY_PREFIX}${newSessionId}`
+              const isSubmitted = localStorage.getItem(submittedKey) === "true"
+              // If persisted as submitted, restore that state
+              if (isSubmitted && !infoSubmitted) {
+                console.log("CustomerMenu: Restoring infoSubmitted state from localStorage for this session.")
+                setInfoSubmitted(true)
+              }
+
+              // 🔹 Restore PIN verification state for this session
+              const pinVerifiedKey = `${PIN_VERIFIED_STORAGE_KEY_PREFIX}${newSessionId}`
+              const isPinVerified = localStorage.getItem(pinVerifiedKey) === "true"
+              if (isPinVerified && !pinVerified) {
+                console.log("CustomerMenu: Restoring pinVerified state from localStorage for this session.")
+                setPinVerified(true)
+              }
+            }
           }
           setTablePinData(pinData)
           setSessionId(newSessionId)
@@ -214,11 +290,11 @@ export default function CustomerMenu() {
     if (!sessionId) return
 
     const unsubscribe = onSnapshot(
-        query(collection(db, "individualItems"), where("sessionId", "==", sessionId)),
-        (snapshot) => {
-          const items = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }))
-          setIndividualItems(items)
-        }
+      query(collection(db, "individualItems"), where("sessionId", "==", sessionId)),
+      (snapshot) => {
+        const items = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }))
+        setIndividualItems(items)
+      }
     )
 
     return () => unsubscribe()
@@ -253,19 +329,33 @@ export default function CustomerMenu() {
 
   // Check if session is closed
   useEffect(() => {
-    if (!sessionId) return
+    if (!table) return
     console.log(`CustomerMenu: Checking session closed status for table: ${table}`)
     const unsubscribe = onSnapshot(doc(db, "tablePins", table), (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data()
-        if (data.closed) {
-          setSessionClosed(true)
-          console.log("CustomerMenu: Session closed detected.")
+        const isClosed = !!data.closed
+        setSessionClosed(isClosed)
+
+        if (isClosed) {
+          console.log("CustomerMenu: Session closed detected. Clearing local data for fresh start.")
+          // Clear data so next launch is "normal" (fresh inputs)
+          localStorage.removeItem(CUSTOMER_INFO_STORAGE_KEY)
+          localStorage.removeItem(DRAFT_ORDER_STORAGE_KEY)
+          // Clear PIN verification for closed session
+          if (sessionId) {
+            localStorage.removeItem(`${PIN_VERIFIED_STORAGE_KEY_PREFIX}${sessionId}`)
+          }
+          setCustomerName("")
+          setCustomerPhone("")
+          setInfoSubmitted(false)
+          setPinVerified(false)
+          setOrder([])
         }
       }
     })
     return () => unsubscribe()
-  }, [sessionId, table])
+  }, [table, CUSTOMER_INFO_STORAGE_KEY, DRAFT_ORDER_STORAGE_KEY])
 
   const addItem = (item) => {
     const exists = order.find((i) => i.name === item.name)
@@ -316,6 +406,10 @@ export default function CustomerMenu() {
       })
       setInfoSubmitted(true) // THIS IS THE KEY: Set infoSubmitted to true ONLY on successful submission
       // Save customer info to localStorage (already handled by separate useEffect)
+
+      // 🔹 NEW: Persist the submission status for this session
+      localStorage.setItem(`${INFO_SUBMITTED_STORAGE_KEY_PREFIX}${sessionId}`, "true")
+
       console.log("CustomerMenu: Customer info submitted successfully. infoSubmitted set to true.")
     } catch (error) {
       console.error("CustomerMenu: Error submitting customer info:", error)
@@ -388,6 +482,8 @@ export default function CustomerMenu() {
 
       // 5️⃣ Clear UI state immediately
       setOrder([])
+      // 🔹 NEW: Clear draft order from storage since it's now placed
+      localStorage.removeItem(DRAFT_ORDER_STORAGE_KEY)
 
     } catch (error) {
       console.error("CustomerMenu: Error placing order:", error)
@@ -413,6 +509,11 @@ export default function CustomerMenu() {
     // setLoading(true)
     try {
       setPinVerified(true)
+      // 🔹 Persist PIN verification to localStorage for this session
+      if (sessionId) {
+        localStorage.setItem(`${PIN_VERIFIED_STORAGE_KEY_PREFIX}${sessionId}`, "true")
+        console.log("CustomerMenu: PIN verification saved to localStorage for session:", sessionId)
+      }
       await placeOrderDirectly()
       setShowPinPrompt(false)
       setTablePin("")
@@ -528,60 +629,47 @@ export default function CustomerMenu() {
           backgroundColor: "#f0f2f5",
         }}
       >
-        {/* Logo Header */}
+        {/* Logo and Name Header */}
         <div
           style={{
-            position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
-            background: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
-            color: "white",
-            padding: "15px 20px",
-            boxShadow: "0 2px 10px rgba(0,0,0,0.1)",
-            zIndex: 1000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: "15px",
+            marginBottom: "2rem",
           }}
         >
-          <div
+          <img
+            src="/logo.png"
+            alt="Restaurant Logo"
             style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: "15px",
+              height: "80px",
+              width: "auto",
             }}
-          >
-            <img
-              src="/logo.png"
-              alt="Restaurant Logo"
+          />
+          <div>
+            <h1
               style={{
-                height: "150px", // Consistent logo size
-                width: "auto",
+                margin: 0,
+                fontSize: "1.5rem",
+                fontWeight: "bold",
+                color: "#343a40",
               }}
-            />
-            <div>
-              <h1
-                style={{
-                  margin: 0,
-                  fontSize: "1.5rem",
-                  fontWeight: "bold",
-                  textShadow: "2px 2px 4px rgba(0,0,0,0.3)",
-                }}
-              >
-                ANANTH ANDHRA STYLE
-              </h1>
-              <p
-                style={{
-                  margin: 0,
-                  fontSize: "0.9rem",
-                  opacity: 0.9,
-                }}
-              >
-                Family Restaurant
-              </p>
-            </div>
+            >
+              ANANTH ANDHRA STYLE
+            </h1>
+            <p
+              style={{
+                margin: 0,
+                fontSize: "0.9rem",
+                color: "#6c757d",
+              }}
+            >
+              Family Restaurant
+            </p>
           </div>
         </div>
-        <div style={{ marginTop: "100px" }}>
+        <div>
           <h2 style={{ fontSize: "1.8rem", color: "#28a745", marginBottom: "1rem" }}>✅ Table Session Closed</h2>
           <p style={{ fontSize: "1.1rem", color: "#555", marginBottom: "0.5rem" }}>Thank you for dining with us!</p>
           <p style={{ fontSize: "1.1rem", color: "#555" }}>This table is now available for new customers.</p>
@@ -605,60 +693,47 @@ export default function CustomerMenu() {
           backgroundColor: "#f0f2f5",
         }}
       >
-        {/* Logo Header */}
+        {/* Logo and Name Header */}
         <div
           style={{
-            position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
-            background: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
-            color: "white",
-            padding: "15px 20px",
-            boxShadow: "0 2px 10px rgba(0,0,0,0.1)",
-            zIndex: 1000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: "15px",
+            marginBottom: "2rem",
           }}
         >
-          <div
+          <img
+            src="/logo.png"
+            alt="Restaurant Logo"
             style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: "15px",
+              height: "80px",
+              width: "auto",
             }}
-          >
-            <img
-              src="/logo.png"
-              alt="Restaurant Logo"
+          />
+          <div>
+            <h1
               style={{
-                height: "150px", // Consistent logo size
-                width: "auto",
+                margin: 0,
+                fontSize: "1.5rem",
+                fontWeight: "bold",
+                color: "#343a40",
               }}
-            />
-            <div>
-              <h1
-                style={{
-                  margin: 0,
-                  fontSize: "1.5rem",
-                  fontWeight: "bold",
-                  textShadow: "2px 2px 4px rgba(0,0,0,0.3)",
-                }}
-              >
-                ANANTH ANDHRA STYLE
-              </h1>
-              <p
-                style={{
-                  margin: 0,
-                  fontSize: "0.9rem",
-                  opacity: 0.9,
-                }}
-              >
-                Family Restaurant
-              </p>
-            </div>
+            >
+              ANANTH ANDHRA STYLE
+            </h1>
+            <p
+              style={{
+                margin: 0,
+                fontSize: "0.9rem",
+                color: "#6c757d",
+              }}
+            >
+              Family Restaurant
+            </p>
           </div>
         </div>
-        <div style={{ marginTop: "100px" }}>
+        <div>
           <h2 style={{ fontSize: "1.8rem", color: "#007bff", marginBottom: "1rem" }}>Table {table}</h2>
           <p style={{ fontSize: "1.1rem", color: "#6c757d", marginBottom: "0.5rem" }}>
             ⏳ Waiting for waiter to activate this table...
@@ -675,63 +750,49 @@ export default function CustomerMenu() {
   return (
     <div style={{ backgroundColor: "#f5f5f5", minHeight: "100vh" }}>
       {loading && <LoadingSpinner />}
-      {/* Logo Header */}
+      {/* Logo and Name Header */}
       <div
         style={{
-          position: "fixed",
-          top: 0,
-          left: 0,
-          right: 0,
-          background: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
-          color: "white",
-          padding: "15px 20px",
-          boxShadow: "0 2px 10px rgba(0,0,0,0.1)",
-          zIndex: 1000,
-          transform: headerVisible ? "translateY(0)" : "translateY(-100%)", // Apply transform based on state
-          transition: "transform 0.3s ease-in-out", // Smooth transition
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: "15px",
+          padding: "1rem",
+          paddingTop: "1.5rem",
         }}
       >
-        <div
+        <img
+          src="/logo.png"
+          alt="Restaurant Logo"
           style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: "15px",
+            height: "80px",
+            width: "auto",
           }}
-        >
-          <img
-            src="/logo.png"
-            alt="Restaurant Logo"
+        />
+        <div>
+          <h1
             style={{
-              height: "150px",
-              width: "auto",
+              margin: 0,
+              fontSize: "1.5rem",
+              fontWeight: "bold",
+              color: "#343a40",
             }}
-          />
-          <div>
-            <h1
-              style={{
-                margin: 0,
-                fontSize: "1.5rem",
-                fontWeight: "bold",
-                textShadow: "2px 2px 4px rgba(0,0,0,0.3)",
-              }}
-            >
-              ANANTH ANDHRA STYLE
-            </h1>
-            <p
-              style={{
-                margin: 0,
-                fontSize: "0.9rem",
-                opacity: 0.9,
-              }}
-            >
-              Family Restaurant
-            </p>
-          </div>
+          >
+            ANANTH ANDHRA STYLE
+          </h1>
+          <p
+            style={{
+              margin: 0,
+              fontSize: "0.9rem",
+              color: "#6c757d",
+            }}
+          >
+            Family Restaurant
+          </p>
         </div>
       </div>
       {/* Main Content */}
-      <div style={{ padding: "1rem", paddingTop: "100px", paddingBottom: "15rem" }}>
+      <div style={{ padding: "1rem", paddingBottom: "15rem" }}>
         <h2 style={{ fontSize: "1.8rem", marginBottom: "0.5rem", color: "#343a40" }}>Table {table}</h2>
         <p style={{ color: "#28a745", fontWeight: "bold", fontSize: "1rem", marginBottom: "1.5rem" }}>
           ✅ Table is Active - Ready to Order!
